@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WeLoop / COROS 时间同步（多协议）</title>
+<style>
+  :root { --bg:#1a1a1a; --card:#262626; --border:#3a3a3a; --txt:#e0e0e0; --mut:#888; --acc:#4a9eff; --ok:#4caf50; --warn:#ff9800; --err:#f44336; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--txt); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; line-height:1.6; max-width:760px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--mut); font-size:13px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:15px; color:var(--acc); font-weight:600; }
+  button { background:var(--acc); color:#fff; border:none; border-radius:8px; padding:10px 18px; font-size:14px; cursor:pointer; width:100%; transition:opacity .15s; font-weight:600; }
+  button:hover { opacity:.88; }
+  button:disabled { background:#555; cursor:not-allowed; opacity:.6; }
+  button.ghost { background:transparent; border:1px solid var(--border); color:var(--txt); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .row > * { flex:1; min-width:120px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input, select { width:100%; background:#1f1f1f; border:1px solid var(--border); color:var(--txt); border-radius:6px; padding:8px 10px; font-size:14px; }
+  input[type=checkbox] { width:auto; }
+  /* ---- 可编辑下拉（combobox）：替代 datalist，输入框有值时也能展开 ---- */
+  .combo { position:relative; }
+  .combo > input { padding-right:38px; }
+  .combo-btn { position:absolute; right:1px; top:1px; bottom:1px; width:34px; padding:0; background:transparent; border:none; border-left:1px solid var(--border); color:var(--mut); font-size:12px; font-weight:400; border-radius:0 6px 6px 0; }
+  .combo-btn:hover { background:#2c2c2c; opacity:1; }
+  .combo-list { position:absolute; z-index:30; left:0; right:0; top:calc(100% + 4px); margin:0; padding:4px; list-style:none; background:#1f1f1f; border:1px solid var(--border); border-radius:6px; max-height:240px; overflow:auto; box-shadow:0 6px 18px rgba(0,0,0,.45); }
+  .combo-list[hidden] { display:none; }
+  .combo-list li { display:flex; align-items:baseline; gap:8px; padding:6px 9px; border-radius:4px; cursor:pointer; font-size:14px; }
+  .combo-list li:hover, .combo-list li.active { background:var(--acc); color:#fff; }
+  .combo-list li .tag { margin-left:auto; font-size:11px; color:var(--mut); white-space:nowrap; }
+  .combo-list li:hover .tag, .combo-list li.active .tag { color:#dceaff; }
+  .combo-list li.dim { opacity:.45; }
+  .combo-list li.dim:hover, .combo-list li.dim.active { opacity:1; }
+  .combo-list li.no { color:var(--mut); font-size:11px; border-top:1px solid var(--border); border-radius:0; }
+  .combo-list li.no:hover { background:transparent; color:var(--mut); }
+  .chk { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--txt); margin:10px 0 0; }
+  .log { background:#111; border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-family:"SF Mono",Consolas,Menlo,monospace; font-size:12px; line-height:1.5; height:300px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+  .log .i { color:#9cdcfe; } .log .ok { color:var(--ok); } .log .w { color:var(--warn); } .log .e { color:var(--err); } .log .m { color:var(--mut); }
+  .status { display:inline-block; padding:2px 10px; border-radius:10px; font-size:12px; background:#3a3a3a; }
+  .status.on { background:var(--ok); color:#fff; }
+  .status.off { background:#555; color:#ccc; }
+  .note { font-size:12px; color:var(--mut); margin-top:8px; }
+  .note a { color:var(--acc); }
+  .hint { font-size:12px; color:var(--warn); margin-top:6px; display:none; }
+  .hint.show { display:block; }
+  details { margin-top:10px; }
+  details summary { cursor:pointer; color:var(--mut); font-size:13px; }
+  details pre { background:#111; padding:10px; border-radius:6px; overflow:auto; font-size:11px; color:#bbb; margin-top:8px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; margin-top:8px; }
+  th,td { border:1px solid var(--border); padding:5px 7px; text-align:left; }
+  th { color:var(--acc); }
+</style>
+</head>
+<body>
+
+<h1>WeLoop / COROS 时间同步（多协议）</h1>
+<div class="sub">基于 Web Bluetooth，协议反编译自 WeLoop 官方 app。支持 V2 / V1 三代协议，可自定义蓝牙匹配名。</div>
+
+<div class="card">
+  <h2>1. 蓝牙匹配</h2>
+  <label>设备名前缀（区分大小写，留空则不过滤）</label>
+  <div class="combo" id="combo">
+    <input type="text" id="namePrefix" value="WeLoop" placeholder="例如 WeLoop / COROS / Tommy" autocomplete="off" spellcheck="false">
+    <button type="button" class="combo-btn" id="comboBtn" tabindex="-1" aria-label="展开预设名称">▼</button>
+    <ul class="combo-list" id="comboList" hidden></ul>
+  </div>
+  <label class="chk"><input type="checkbox" id="acceptAll"> 列出所有 BLE 设备（忽略名称过滤，找不到设备时用）</label>
+  <div class="note">默认 <b>WeLoop</b>。若选择框里看不到设备，改成 <code>COROS</code>、<code>Tommy</code>、<code>Now</code> 等，或勾选"列出所有"。</div>
+</div>
+
+<div class="card">
+  <h2>2. 协议与参数</h2>
+  <label>协议</label>
+  <select id="proto">
+    <option value="auto">自动探测（按 GATT 服务判定，推荐）</option>
+    <option value="v2-140">V2 — cmd 140（Hey 3S / XH3 / Neo / MyLink+ / X9K / COROS）</option>
+    <option value="v1-144">V1 — cmd 144 两阶段（Tommy / Now / NowC / B08 / Now2）</option>
+    <option value="v1-80">V1 — cmd 80 初始化帧（老机型，实验性）</option>
+  </select>
+  <div class="note" id="protoDesc"></div>
+
+  <div class="row">
+    <div>
+      <label>时区（小时偏移）</label>
+      <input type="number" id="tz" step="0.5">
+    </div>
+    <div>
+      <label>响应超时 (ms)</label>
+      <input type="number" id="timeout" value="5000" step="500">
+    </div>
+    <div>
+      <label>分包间隔 (ms)</label>
+      <input type="number" id="gap" value="60" step="10">
+    </div>
+  </div>
+
+  <div id="v2opt" style="display:none">
+    <label class="chk"><input type="checkbox" id="v2color"> 附加显示颜色字节（payload 7 字节）</label>
+    <div class="row" style="margin-top:4px">
+      <div>
+        <label>颜色值（0=默认 1=黑白反色 2=黑白黄蓝反色）</label>
+        <input type="number" id="colorVal" value="0" min="0" max="2">
+      </div>
+    </div>
+  </div>
+
+  <div id="v1opt" style="display:none">
+    <div class="hint show">时间取「当前时间 + 2 秒」以补偿传输延迟（与官方 app 一致）。</div>
+    <div id="v180opt" style="display:none">
+      <label>初始化帧尾字段（hex，对应 byte9/10/11-12/14/15/16/17/18；byte13 为时区，自动填）</label>
+      <div class="grid4">
+        <input type="text" id="b9"  value="00" title="byte9">
+        <input type="text" id="b10" value="00" title="byte10">
+        <input type="text" id="b11" value="0000" title="byte11-12 (short LE)">
+        <input type="text" id="b14" value="00" title="byte14">
+        <input type="text" id="b15" value="00" title="byte15">
+        <input type="text" id="b16" value="00" title="byte16">
+        <input type="text" id="b17" value="00" title="byte17">
+        <input type="text" id="b18" value="00" title="byte18 单位体系（-1 省略）">
+      </div>
+      <div class="note">含义未完全还原，默认全 0。byte18 填 <code>ff</code>(=-1) 则省略该字节。</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>3. 连接并同步</h2>
+  <div class="row">
+    <button id="btnSync">🔗 连接并同步时间</button>
+    <button id="btnScan" class="ghost">🔍 仅诊断（枚举服务）</button>
+    <button id="btnDisconnect" class="ghost" disabled>断开</button>
+  </div>
+  <div class="note">状态: <span id="status" class="status off">未连接</span></div>
+</div>
+
+<div class="card">
+  <h2>4. 日志</h2>
+  <div id="log" class="log"></div>
+</div>
+
+<div class="card">
+  <h2>说明 / 故障排除</h2>
+  <div class="note">
+    • <b>必须用 Chrome / Edge / Opera</b>（安卓 Chrome 也行）。Safari、Firefox 不支持 Web Bluetooth。<br>
+    • 用 <code>https://</code> 或 <code>file://</code> 打开（直接双击本 HTML 即可）。<br>
+    • 安卓 Chrome：需 Android 6.0+ 且开启位置权限（BLE 扫描依赖）。<br>
+    • 连不上？先在系统蓝牙设置里<b>忽略/取消配对</b>该设备（Web Bluetooth 不能用已配对设备）。<br>
+    • 时间没变？断开蓝牙重连，部分固件要重连才刷新显示。<br>
+    • 不知道用哪个协议？先点「仅诊断」，日志会打印服务列表并判定 V1 / V2。
+  </div>
+  <details>
+    <summary>协议速查（反编译所得，详见 PROTOCOL-ALL.md）</summary>
+    <table>
+      <tr><th>协议</th><th>判定依据</th><th>时间同步命令</th><th>适用机型</th></tr>
+      <tr><td>V2</td><td>同时有 <code>…77656C6F6F70</code> 与 <code>…E50E24DCCA9E</code> 两个服务</td><td>cmd 140</td><td>Hey 3S、XH3、Neo/Now3、MyLink+、X9K、COROS 全系</td></tr>
+      <tr><td>V1</td><td>只有 <code>…77656C6F6F70</code> 一个服务</td><td>cmd 144（两阶段）</td><td>Tommy、Tommy2/B08、Now、NowC、Now2</td></tr>
+      <tr><td>V0</td><td>有 <code>00001530-1212-efde-1523-785feabcd123</code>（DFU）</td><td>—</td><td>老 Tommy 的 DfuTarg 模式</td></tr>
+    </table>
+<pre>命令通道 Service : 6e400001-b5a3-f393-e0a9-77656c6f6f70   (后缀 ASCII = "weloop")
+  写 RX         : 6e400002-b5a3-f393-e0a9-77656c6f6f70
+  通知 TX       : 6e400003-b5a3-f393-e0a9-77656c6f6f70
+数据通道 Service : 6e400001-b5a3-f393-e0a9-e50e24dcca9e   (仅 V2)
+  写            : 6e400002-b5a3-f393-e0a9-e50e24dcca9e
+  通知          : 6e400003-b5a3-f393-e0a9-e50e24dcca9e
+通知推送 Service : 6e400001-b5a3-f393-e0a9-77757c7f7f70   (仅 V2，可选)
+
+[V2 cmd 140]  [140][seq=0][unix-1388534400 : 4B 小端][tz/30][tz15]([颜色])
+  1388534400 = 2014-01-01 UTC
+  成功返回: [140][seq][1]
+
+[V1 cmd 144]  阶段1: "H2DR" + [144][11][0][checksum]     (8 字节)
+              阶段2: [年:2B 小端][月][日][时][分][秒][tz/30][0][0][checksum]  (11 字节)
+              checksum = 前 N-1 字节求和 & 0xFF
+
+[V1 cmd 80]   0xA5 80 01 [年-2000][月][日][时][分][秒] [byte9][byte10][byte11-12]
+              [tz/30][byte14][byte15][byte16][byte17]([byte18])</pre>
+  </details>
+</div>
+
+<script>
+// ===== UUID 常量（反编译所得）=====
+const SVC_CMD   = "6e400001-b5a3-f393-e0a9-77656c6f6f70";
+const SVC_DATA  = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const SVC_NOTIF = "6e400001-b5a3-f393-e0a9-77757c7f7f70";
+const RX_CMD    = "6e400002-b5a3-f393-e0a9-77656c6f6f70";
+const TX_CMD    = "6e400003-b5a3-f393-e0a9-77656c6f6f70";
+const RX_DATA   = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const TX_DATA   = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const SVC_DFU   = "00001530-1212-efde-1523-785feabcd123";
+const SERVICE_IDS = [SVC_CMD, SVC_DATA, SVC_NOTIF];
+
+const CMD_V2_SYNC_TIME = 140;   // 0x8C
+const CMD_V1_SYNC_TIME = 144;   // 0x90
+const CMD_V1_INIT      = 80;    // 0x50
+const TIME_EPOCH = 1388534400;  // 2014-01-01 UTC
+
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+let server = null, device = null, txChar = null, notifyBound = false;
+let waitResp = null;
+
+// ---------- 日志 ----------
+function log(msg, cls='i') {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = msg + '\n';
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+const ok   = m => log(m, 'ok');
+const err  = m => log(m, 'e');
+const mut  = m => log(m, 'm');
+const warn = m => log(m, 'w');
+
+function setStatus(on, txt) {
+  $('status').textContent = txt;
+  $('status').className = 'status ' + (on ? 'on' : 'off');
+}
+const toHex = u8 => Array.from(u8).map(b => b.toString(16).padStart(2,'0')).join(' ');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---------- 可编辑下拉（自绘，输入框有值也能展开）----------
+const KNOWN_NAMES = [
+  ['WeLoop',   'Hey 3S / XH3 / Neo / Now2 / Now3'],
+  ['COROS',    'PACE / M1 / T1 / OMNI / HELMET'],
+  ['Tommy',    'WN02B01'],
+  ['Tommy2',   'WN08B08 / B08'],
+  ['Now',      'BN01L02'],
+  ['NowC',     'BN01SH02'],
+  ['Now2',     'WeLoop Now2'],
+  ['Now3',     'WeLoop Now 3'],
+  ['Neo',      'WeLoop Neo'],
+  ['XH3',      'WeLoop XH3'],
+  ['X9K',      'Trumpchi X9K'],
+  ['MyLink+',  'MyLink+'],
+  ['DfuTarg',  'DFU 模式（不能同步时间）'],
+  ['BN01L02',  '型号串'],
+  ['BN01SH02', '型号串'],
+  ['WN02B01',  '型号串'],
+  ['WN08B08',  '型号串'],
+  ['WELOOPXH3','型号串']
+];
+const comboInput = $('namePrefix'), comboList = $('comboList'), comboBtn = $('comboBtn');
+let comboActive = -1;
+
+function comboRender() {
+  const kw = (comboInput.value || '').trim().toLowerCase();
+  comboList.innerHTML = '';
+  KNOWN_NAMES.forEach(([v, tag], i) => {
+    const li = document.createElement('li');
+    li.dataset.value = v;
+    li.dataset.idx = String(i);
+    const name = document.createElement('span');
+    name.textContent = v;
+    const t = document.createElement('span');
+    t.className = 'tag';
+    t.textContent = tag;
+    li.appendChild(name); li.appendChild(t);
+    if (kw && v.toLowerCase().indexOf(kw) === -1) li.classList.add('dim');
+    comboList.appendChild(li);
+  });
+  const hint = document.createElement('li');
+  hint.className = 'no';
+  hint.style.cursor = 'default';
+  hint.textContent = kw ? '（以上为全部预设；当前输入 "' + comboInput.value + '" 将作为前缀使用）' : '（直接输入任意前缀，或点上方预设）';
+  comboList.appendChild(hint);
+  // 高亮：优先前缀匹配，其次包含匹配
+  const lower = KNOWN_NAMES.map(([v]) => v.toLowerCase());
+  let idx = kw ? lower.findIndex(v => v.startsWith(kw)) : -1;
+  if (idx < 0 && kw) idx = lower.findIndex(v => v.indexOf(kw) !== -1);
+  comboActive = idx;
+  comboPaint();
+}
+function comboPaint() {
+  Array.from(comboList.children).forEach(li => {
+    li.classList.toggle('active', Number(li.dataset.idx) === comboActive);
+  });
+  const el = comboList.children[comboActive >= 0 ? comboActive : 0];
+  if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+}
+function comboOpen() { comboRender(); comboList.hidden = false; }
+function comboClose() { comboList.hidden = true; comboActive = -1; }
+function comboPick(v) { comboInput.value = v; comboClose(); comboInput.focus(); }
+
+comboList.addEventListener('mousedown', e => {
+  const li = e.target.closest('li[data-value]');
+  if (li) { e.preventDefault(); comboPick(li.dataset.value); }
+});
+comboBtn.addEventListener('mousedown', e => {
+  e.preventDefault();
+  comboList.hidden ? comboOpen() : comboClose();
+  comboInput.focus();
+});
+comboInput.addEventListener('mousedown', () => { if (comboList.hidden) comboOpen(); });
+comboInput.addEventListener('input', () => { comboOpen(); });   // 有值时也保持展开
+comboInput.addEventListener('keydown', e => {
+  const n = KNOWN_NAMES.length;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (comboList.hidden) comboOpen();
+    else comboActive = Math.min(comboActive + 1, n - 1);
+    comboPaint();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    comboActive = Math.max(comboActive - 1, 0);
+    comboPaint();
+  } else if (e.key === 'Enter') {
+    if (!comboList.hidden && comboActive >= 0) { e.preventDefault(); comboPick(KNOWN_NAMES[comboActive][0]); }
+    else comboClose();
+  } else if (e.key === 'Escape') {
+    comboClose();
+  }
+});
+document.addEventListener('mousedown', e => {
+  const t = e.target;
+  if (!t || !t.closest || !t.closest('#combo')) comboClose();
+});
+
+// ---------- 时区 ----------
+(function initTz(){
+  const auto = -new Date().getTimezoneOffset() / 60;   // 东八区 = 8
+  $('tz').value = auto;
+})();
+function tzParts() {
+  const hours = parseFloat($('tz').value);
+  if (isNaN(hours)) throw new Error('时区填错了，用数字，如 8');
+  const tzMin = Math.round(hours * 60);
+  return { hours, tzMin, tz30: Math.floor(tzMin/30) & 0xFF, tz15: Math.floor(tzMin/15) & 0xFF };
+}
+
+// ---------- 组包 ----------
+// V2: [cmd][seq=0][payload]
+function buildV2Packet(cmd, payload) {
+  const pkt = new Uint8Array(2 + payload.length);
+  pkt[0] = cmd & 0xFF;
+  pkt[1] = 0x00;
+  pkt.set(payload, 2);
+  return pkt;
+}
+function buildV2TimePayload(t) {
+  const ts = Math.floor(Date.now()/1000) - TIME_EPOCH;
+  const withColor = $('v2color').checked;
+  const arr = new Uint8Array(withColor ? 7 : 6);
+  const dv = new DataView(arr.buffer);
+  dv.setUint32(0, ts >>> 0, true);          // 小端
+  dv.setUint8(4, t.tz30);
+  dv.setUint8(5, t.tz15);
+  if (withColor) dv.setUint8(6, parseInt($('colorVal').value,10) & 0xFF);
+  return { payload: arr, ts, withColor };
+}
+
+// V1 格式A: "H2DR" + cmd + arg1 + arg2 + checksum(8 字节)
+function buildV1Header(cmd, arg1, arg2) {
+  const p = new Uint8Array(8);
+  p.set([0x48,0x32,0x44,0x52], 0);        // "H2DR"
+  p[4] = cmd & 0xFF;
+  p[5] = arg1 & 0xFF;
+  p[6] = arg2 & 0xFF;
+  p[7] = sum8(p, 0, 7);
+  return p;
+}
+// V1 cmd144 阶段2：11 字节时间数据（时间 = now + 2s）
+function buildV1TimeData(t) {
+  const d = new Date(Date.now() + 2000);
+  const a = new Uint8Array(11);
+  a[0] = d.getFullYear() & 0xFF;
+  a[1] = (d.getFullYear() >> 8) & 0xFF;
+  a[2] = d.getMonth() + 1;
+  a[3] = d.getDate();
+  a[4] = d.getHours();
+  a[5] = d.getMinutes();
+  a[6] = d.getSeconds();
+  a[7] = t.tz30;
+  a[8] = 0;
+  a[9] = 0;
+  a[10] = sum8(a, 0, 10);
+  return { payload: a, date: d };
+}
+// V1 cmd80：0xA5 80 01 + 时间(6B) + 尾字段
+function buildV1InitFrame(t) {
+  const d = new Date(Date.now() + 2000);
+  const hx = (id, def) => {
+    const s = ($(id).value || '').trim() || def;
+    const v = parseInt(s, 16);
+    if (isNaN(v)) throw new Error(id + ' 不是合法 hex');
+    return v;
+  };
+  const b9 = hx('b9','0'), b10 = hx('b10','0'), b11 = hx('b11','0'),
+        b14 = hx('b14','0'), b15 = hx('b15','0'), b16 = hx('b16','0'),
+        b17 = hx('b17','0'), b18 = hx('b18','0');
+  const hasB18 = (b18 & 0xFF) !== 0xFF;    // 0xFF = -1 表示省略
+  const a = new Uint8Array(hasB18 ? 19 : 18);
+  a[0] = 0xA5;
+  a[1] = CMD_V1_INIT;
+  a[2] = 0x01;
+  a[3] = (d.getFullYear() - 2000) & 0xFF;
+  a[4] = d.getMonth() + 1;
+  a[5] = d.getDate();
+  a[6] = d.getHours();
+  a[7] = d.getMinutes();
+  a[8] = d.getSeconds();
+  a[9]  = b9  & 0xFF;
+  a[10] = b10 & 0xFF;
+  a[11] = b11 & 0xFF;
+  a[12] = (b11 >> 8) & 0xFF;
+  a[13] = t.tz30;
+  a[14] = b14 & 0xFF;
+  a[15] = b15 & 0xFF;
+  a[16] = b16 & 0xFF;
+  a[17] = b17 & 0xFF;
+  if (hasB18) a[18] = b18 & 0xFF;
+  return { payload: a, date: d };
+}
+function sum8(u8, start, len) {
+  let s = 0;
+  for (let i = start; i < start + len; i++) s = (s + (u8[i] & 0xFF)) & 0xFF;
+  return s;
+}
+
+// ---------- 写入（按 20 字节切片）----------
+async function writeAll(rxChar, data, label) {
+  const gap = Math.max(0, parseInt($('gap').value, 10) || 0);
+  const CHUNK = 20;
+  let first = true;
+  for (let off = 0; off < data.length; off += CHUNK) {
+    const chunk = data.subarray(off, Math.min(off + CHUNK, data.length));
+    if (!first) await sleep(gap);
+    first = false;
+    try {
+      await rxChar.writeValueWithoutResponse(chunk);
+    } catch (e) {
+      warn('writeWithoutResponse 失败 (' + e.message + ')，尝试 writeWithResponse');
+      await rxChar.writeValueWithResponse(chunk);
+    }
+    log('[write] ' + label + ' 片 ' + (off/CHUNK+1) + ': ' + toHex(chunk), 'm');
+  }
+}
+
+// ---------- 通知 ----------
+function handleNotification(event) {
+  const data = new Uint8Array(event.target.value.buffer);
+  log('[notify] ' + data.length + ' 字节: ' + toHex(data), 'i');
+  if (waitResp) {
+    clearTimeout(waitResp.timer);
+    const w = waitResp; waitResp = null;
+    w.resolve(data);
+  }
+}
+function waitNotify(ms) {
+  return new Promise(resolve => {
+    if (!notifyBound) { setTimeout(() => resolve(null), ms); return; }
+    waitResp = { resolve, timer: setTimeout(() => { waitResp = null; resolve(null); }, ms) };
+  });
+}
+function parseV2Response(data, expectedCmd) {
+  if (!data || data.length < 2) { warn('返回包太短'); return false; }
+  const cmd = data[0];
+  if (cmd !== expectedCmd) { warn(`命令号不匹配: 期望 ${expectedCmd}, 收到 ${cmd}`); return false; }
+  if (data.length >= 3) {
+    const r = data[2];
+    log(`[resp] cmd=${cmd} seq=${data[1]} result=${r} (${r===1?'成功':(r===3?'电量低':'失败/未知')})`, r===1?'ok':'w');
+    return r === 1;
+  }
+  log(`[resp] cmd=${cmd} seq=${data[1]} (无 result 字段, 视为成功)`, 'i');
+  return true;
+}
+function parseV1Response(data) {
+  if (!data || data.length < 3) { warn('返回包太短: ' + (data ? toHex(data) : 'null')); return true; }
+  // 0xA5 包: [A5][cmd][len][data...]；H2DR 应答: cmd 在 byte4
+  if ((data[0] & 0xFF) === 0xA5) {
+    log(`[resp] 0xA5 包 cmd=${data[1]} len=${data[2]}`, 'i');
+  } else if (data.length >= 5) {
+    log(`[resp] cmd(byte4)=${data[4]} arg=${data[5]} status=${data[6]}`, 'i');
+  }
+  return true;
+}
+
+// ---------- 连接 ----------
+async function requestDevice() {
+  const prefix = ($('namePrefix').value || '').trim();
+  const all = $('acceptAll').checked;
+  const opts = { optionalServices: SERVICE_IDS.concat([SVC_DFU, "0000180f-0000-1000-8000-00805f9b34fb", "0000180a-0000-1000-8000-00805f9b34fb"]) };
+  if (!all && prefix) {
+    opts.filters = [{ namePrefix: prefix }];
+    log('按名称前缀过滤: "' + prefix + '"', 'i');
+  } else {
+    opts.acceptAllDevices = true;
+    log(all ? '列出所有 BLE 设备' : '未填名称前缀，列出所有 BLE 设备', 'i');
+  }
+  return navigator.bluetooth.requestDevice(opts);
+}
+
+async function connect() {
+  if (server && server.connected) return true;
+  device = await requestDevice();
+  log('已选设备: ' + (device.name || '(无名)') + '  id=' + device.id, 'i');
+  device.addEventListener('gattserverdisconnected', () => {
+    setStatus(false, '已断开');
+    log('[event] 设备断开', 'w');
+    $('btnSync').disabled = false; $('btnScan').disabled = false; $('btnDisconnect').disabled = true;
+    notifyBound = false; server = null;
+  });
+  log('连接 GATT server ...', 'i');
+  server = await device.gatt.connect();
+  setStatus(true, '已连接');
+  $('btnDisconnect').disabled = false;
+  return true;
+}
+
+async function getChar(svcUuid, charUuid) {
+  const svc = await server.getPrimaryService(svcUuid);
+  return svc.getCharacteristic(charUuid);
+}
+
+async function setupNotify() {
+  notifyBound = false;
+  for (const tx of [TX_CMD, TX_DATA]) {
+    try {
+      const c = await getChar(tx === TX_CMD ? SVC_CMD : SVC_DATA, tx);
+      await c.startNotifications();
+      c.removeEventListener('characteristicvaluechanged', handleNotification);
+      c.addEventListener('characteristicvaluechanged', handleNotification);
+      txChar = c;
+      notifyBound = true;
+      ok('已订阅通知 ' + tx);
+      return;
+    } catch (e) { /* 尝试下一个 */ }
+  }
+  warn('订阅通知失败（部分设备不回包，仍会继续发送）');
+}
+
+// 枚举服务 → 判定协议
+async function detectProtocol() {
+  const services = await server.getPrimaryServices();
+  const uuids = [];
+  for (const s of services) uuids.push(s.uuid.toLowerCase());
+  log('发现 ' + services.length + ' 个服务:', 'i');
+  for (const s of services) {
+    log('  • ' + s.uuid, 'm');
+    try {
+      const cs = await s.getCharacteristics();
+      for (const c of cs) log('      - ' + c.uuid + '  ' + props(c.properties), 'm');
+    } catch (e) { log('      (特征枚举失败: ' + e.message, 'e'); }
+  }
+  const hasCmd = uuids.includes(SVC_CMD);
+  const hasData = uuids.includes(SVC_DATA);
+  const hasDfu = uuids.includes(SVC_DFU);
+  if (hasDfu) { warn('检测到 Nordic DFU 服务 → V0 / DFU 模式，无法同步时间'); return 'v0'; }
+  if (hasCmd && hasData) { ok('同时存在命令通道 + 数据通道 → 判定为 V2 协议'); return 'v2'; }
+  if (hasCmd) { ok('只有命令通道 → 判定为 V1 协议'); return 'v1'; }
+  warn('未找到 weloop 服务，协议未知');
+  return 'unknown';
+}
+function props(p) {
+  const names = [];
+  if (p.read) names.push('read');
+  if (p.write) names.push('write');
+  if (p.writeWithoutResponse) names.push('writeNR');
+  if (p.notify) names.push('notify');
+  if (p.indicate) names.push('indicate');
+  return '[' + names.join(',') + ']';
+}
+
+// ---------- 同步 ----------
+async function doSync(mode) {
+  if (!navigator.bluetooth) { err('此浏览器不支持 Web Bluetooth。请用 Chrome / Edge / Opera。'); return; }
+  const t = tzParts();
+  if (mode === 'v2-140') mode = 'v2';
+
+  log('='.repeat(52), 'm');
+  log(`协议模式: ${mode}   时区=${t.hours}h (${t.tzMin}min) tz30=${t.tz30} tz15=${t.tz15}`, 'i');
+
+  try {
+    await connect();
+    await setupNotify();
+
+    let rxChar;
+    try { rxChar = await getChar(SVC_CMD, RX_CMD); }
+    catch (e) { err('获取写特征失败: ' + e.message); return; }
+
+    const to = parseInt($('timeout').value, 10) || 5000;
+    let success = false;
+
+    if (mode === 'v2') {
+      const { payload, ts } = buildV2TimePayload(t);
+      const pkt = buildV2Packet(CMD_V2_SYNC_TIME, payload);
+      log(`[payload] ts(减2014)=${ts} tz30=${t.tz30} tz15=${t.tz15}`, 'm');
+      log(`[packet] ${toHex(pkt)} (${pkt.length} 字节) cmd=${CMD_V2_SYNC_TIME}`, 'm');
+      await writeAll(rxChar, pkt, 'cmd140');
+      const resp = await waitNotify(to);
+      success = resp ? parseV2Response(resp, CMD_V2_SYNC_TIME) : true;
+      if (!resp) warn('未收到返回包（' + to + 'ms 超时）。部分设备写完即生效。');
+
+    } else if (mode === 'v1-144') {
+      const hdr = buildV1Header(CMD_V1_SYNC_TIME, 11, 0);
+      log(`[阶段1] ${toHex(hdr)}  cmd=${CMD_V1_SYNC_TIME} arg1=11 arg2=0`, 'm');
+      await writeAll(rxChar, hdr, 'cmd144-hdr');
+      let resp = await waitNotify(Math.min(to, 3000));
+      if (!resp) { warn('阶段1 无回应（' + Math.min(to,3000) + 'ms），等待 400ms 后仍继续发送'); await sleep(400); }
+      else parseV1Response(resp);
+
+      const { payload, date } = buildV1TimeData(t);
+      log(`[阶段2] ${toHex(payload)}  (${payload.length} 字节)  时间=${date.toLocaleString()}`, 'm');
+      await writeAll(rxChar, payload, 'cmd144-data');
+      resp = await waitNotify(to);
+      success = resp ? parseV1Response(resp) : true;
+      if (!resp) warn('阶段2 未收到回应（' + to + 'ms 超时）。');
+
+    } else if (mode === 'v1-80') {
+      const { payload, date } = buildV1InitFrame(t);
+      log(`[packet] ${toHex(payload)} (${payload.length} 字节) cmd=${CMD_V1_INIT} 时间=${date.toLocaleString()}`, 'm');
+      await writeAll(rxChar, payload, 'cmd80');
+      const resp = await waitNotify(to);
+      success = resp ? parseV1Response(resp) : true;
+      if (!resp) warn('未收到回应（' + to + 'ms 超时）。');
+    }
+
+    if (success) ok('\n✅ 时间同步命令已发送完成！');
+    else warn('\n⚠️ 设备返回非成功，时间可能未同步。可断开重连后再试。');
+    log('若手表时间没变：断开蓝牙重连后再跑一次。', 'm');
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') warn('选择框里没看到设备？试试: 改名称前缀 / 勾选"列出所有" / 靠近设备 / 系统蓝牙里取消已配对。');
+    else err('出错: ' + (e && e.name ? e.name + ' - ' : '') + (e && e.message ? e.message : e));
+    if (e && /NetworkError|GATT/i.test(e.name || '')) warn('  GATT 操作失败: 设备可能已断开或不在范围。');
+  }
+}
+
+// ---------- 按钮 ----------
+$('btnSync').onclick = async () => {
+  $('btnSync').disabled = true; $('btnScan').disabled = true;
+  try {
+    let mode = $('proto').value;
+    if (mode === 'auto') {
+      await connect();
+      const detected = await detectProtocol();
+      if (detected === 'v2') mode = 'v2';
+      else if (detected === 'v1') mode = 'v1-144';
+      else { err('无法判定协议，请手动选择后重试。'); return; }
+    }
+    await doSync(mode);
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') warn('选择框里没看到设备？试试: 改名称前缀 / 勾选"列出所有" / 靠近设备 / 系统蓝牙里取消已配对。');
+    else err('出错: ' + (e && e.name ? e.name + ' - ' : '') + (e && e.message ? e.message : e));
+  } finally {
+    $('btnSync').disabled = false; $('btnScan').disabled = false;
+  }
+};
+
+$('btnScan').onclick = async () => {
+  if (!navigator.bluetooth) { err('此浏览器不支持 Web Bluetooth。'); return; }
+  $('btnSync').disabled = true; $('btnScan').disabled = true;
+  log('='.repeat(52), 'm');
+  try {
+    await connect();
+    await detectProtocol();
+    ok('诊断完成。根据上方判定结果，在"协议"下拉里选对应项再点同步。');
+  } catch (e) {
+    err('诊断出错: ' + (e && e.name ? e.name + ' - ' : '') + (e && e.message ? e.message : e));
+  } finally {
+    $('btnSync').disabled = false; $('btnScan').disabled = false;
+  }
+};
+
+$('btnDisconnect').onclick = () => {
+  if (server && server.connected) { try { server.disconnect(); } catch(e){} log('已主动断开', 'i'); }
+  setStatus(false, '未连接');
+  $('btnSync').disabled = false; $('btnScan').disabled = false; $('btnDisconnect').disabled = true;
+  notifyBound = false; server = null;
+};
+
+// 协议切换 → 显示对应高级选项 + 描述
+const DESC = {
+  'auto':   '连接后枚举 GATT 服务，按是否同时存在命令通道与数据通道自动判定 V2 / V1。',
+  'v2-140': 'payload 6 字节（勾选颜色则 7 字节）：4 字节小端时间戳 + tz/30 + tz15。适用绝大多数新机型。',
+  'v1-144': '两阶段握手：先发 8 字节 "H2DR" 头，等设备回应后再发 11 字节时间数据。',
+  'v1-80':  '单帧 0xA5 初始化命令，帧内带时间。老机型的另一种写法，实验性。'
+};
+function syncProtoUI() {
+  const v = $('proto').value;
+  $('protoDesc').textContent = DESC[v] || '';
+  $('v2opt').style.display  = (v === 'v2-140') ? 'block' : 'none';
+  $('v1opt').style.display  = (v === 'v1-144' || v === 'v1-80') ? 'block' : 'none';
+  $('v180opt').style.display = (v === 'v1-80') ? 'block' : 'none';
+}
+$('proto').onchange = syncProtoUI;
+syncProtoUI();
+
+mut('就绪。不知道协议就先点「仅诊断」。');
+mut('提示: 把此 HTML 拷到带蓝牙的电脑/手机，用 Chrome 打开即可。');
+</script>
+</body>
+</html>
