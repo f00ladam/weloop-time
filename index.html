@@ -132,9 +132,10 @@
   <div class="row">
     <button id="btnSync">🔗 连接并同步时间</button>
     <button id="btnScan" class="ghost">🔍 仅诊断（枚举服务）</button>
-    <button id="btnDisconnect" class="ghost" disabled>断开</button>
+    <button id="btnDisconnect" class="ghost" disabled>⏏ 断开 / 取消配对</button>
   </div>
   <div class="note">状态: <span id="status" class="status off">未连接</span></div>
+  <div class="note">「断开 / 取消配对」会依次执行：停止通知 → <code>gatt.disconnect()</code> → <code>device.forget()</code>（把设备从浏览器许可列表移除）。若系统蓝牙里仍显示已连接，多为系统蓝牙栈缓存或自动重连，请见下方说明。</div>
 </div>
 
 <div class="card">
@@ -150,7 +151,8 @@
     • 安卓 Chrome：需 Android 6.0+ 且开启位置权限（BLE 扫描依赖）。<br>
     • 连不上？先在系统蓝牙设置里<b>忽略/取消配对</b>该设备（Web Bluetooth 不能用已配对设备）。<br>
     • 时间没变？断开蓝牙重连，部分固件要重连才刷新显示。<br>
-    • 不知道用哪个协议？先点「仅诊断」，日志会打印服务列表并判定 V1 / V2。
+    • 不知道用哪个协议？先点「仅诊断」，日志会打印服务列表并判定 V1 / V2。<br>
+    • <b>点了断开但电脑仍显示连着？</b>这是操作系统蓝牙栈的行为，不是页面没断。Web Bluetooth 的 <code>disconnect()</code> 只断 GATT 连接，底层 LE 链路可能被系统保留数秒；设备若配对过，系统还会自动重连。彻底断开需要在系统蓝牙设置里「删除设备」（Windows：设置 → 蓝牙和其他设备 → 该设备 → 删除设备），或在手表端关闭蓝牙。本页的「断开 / 取消配对」已自动尝试 <code>device.forget()</code>（Chrome 103+）。
   </div>
   <details>
     <summary>协议速查（反编译所得，详见 PROTOCOL-ALL.md）</summary>
@@ -479,6 +481,67 @@ function parseV1Response(data) {
   return true;
 }
 
+// ---------- 断开 / 取消配对 ----------
+function detachNotifications() {
+  if (waitResp) { clearTimeout(waitResp.timer); waitResp = null; }
+  if (txChar) {
+    try { txChar.removeEventListener('characteristicvaluechanged', handleNotification); } catch (e) {}
+    try { txChar.stopNotifications(); } catch (e) {}
+    txChar = null;
+  }
+  notifyBound = false;
+}
+
+function resetButtons() {
+  $('btnSync').disabled = false;
+  $('btnScan').disabled = false;
+  $('btnDisconnect').disabled = true;
+}
+
+// 彻底断开：停通知 → gatt.disconnect() → device.forget()（取消配对/移除设备）
+async function fullDisconnect(quiet) {
+  if (!quiet) log('='.repeat(52), 'm');
+  const d = device;
+  detachNotifications();
+
+  if (d) {
+    // 1) 断开 GATT
+    try {
+      if (d.gatt.connected) { d.gatt.disconnect(); ok('已调用 gatt.disconnect()'); }
+      else mut('GATT 已处于断开状态');
+    } catch (e) {
+      warn('gatt.disconnect() 失败: ' + e.message);
+      try { if (server && server.connected) server.disconnect(); } catch (e2) {}
+    }
+
+    // 2) 等 gattserverdisconnected 事件落地
+    await sleep(300);
+
+    // 3) 取消配对 / 忘记设备（Chrome 103+）
+    if (typeof d.forget === 'function') {
+      try { await d.forget(); ok('已调用 device.forget()：设备已从浏览器许可列表移除'); }
+      catch (e) { warn('device.forget() 失败: ' + e.name + ' - ' + e.message); }
+    } else {
+      mut('当前浏览器不支持 device.forget()（需 Chrome 103+），请到系统蓝牙设置里手动「删除设备」');
+    }
+  } else if (!quiet) {
+    mut('当前没有已连接的设备');
+  }
+
+  setStatus(false, '未连接');
+  device = null;
+  server = null;
+  notifyBound = false;
+  resetButtons();
+
+  if (!quiet) {
+    warn('若系统蓝牙里仍显示「已连接」，这是操作系统蓝牙栈的缓存/自动重连行为，不是页面没断开：');
+    mut('  · gatt.disconnect() 只断 GATT 连接，底层 LE 链路可能被系统保留数秒');
+    mut('  · 设备已配对/绑定过时，系统往往会自动重连');
+    mut('  · 本页已尝试 device.forget()（取消配对）；若仍不行，请到系统蓝牙设置里「删除设备」，或在手表上关掉蓝牙');
+  }
+}
+
 // ---------- 连接 ----------
 async function requestDevice() {
   const prefix = ($('namePrefix').value || '').trim();
@@ -498,11 +561,15 @@ async function connect() {
   if (server && server.connected) return true;
   device = await requestDevice();
   log('已选设备: ' + (device.name || '(无名)') + '  id=' + device.id, 'i');
+  $('btnDisconnect').disabled = false;     // 选了设备就允许断开
   device.addEventListener('gattserverdisconnected', () => {
     setStatus(false, '已断开');
-    log('[event] 设备断开', 'w');
-    $('btnSync').disabled = false; $('btnScan').disabled = false; $('btnDisconnect').disabled = true;
-    notifyBound = false; server = null;
+    log('[event] 设备断开 (gattserverdisconnected)', 'w');
+    detachNotifications();
+    server = null;
+    $('btnSync').disabled = false;
+    $('btnScan').disabled = false;
+    $('btnDisconnect').disabled = !device;   // 仍持有设备对象时允许继续「取消配对」
   });
   log('连接 GATT server ...', 'i');
   server = await device.gatt.connect();
@@ -665,11 +732,9 @@ $('btnScan').onclick = async () => {
   }
 };
 
-$('btnDisconnect').onclick = () => {
-  if (server && server.connected) { try { server.disconnect(); } catch(e){} log('已主动断开', 'i'); }
-  setStatus(false, '未连接');
-  $('btnSync').disabled = false; $('btnScan').disabled = false; $('btnDisconnect').disabled = true;
-  notifyBound = false; server = null;
+$('btnDisconnect').onclick = async () => {
+  $('btnDisconnect').disabled = true;
+  await fullDisconnect(false);
 };
 
 // 协议切换 → 显示对应高级选项 + 描述
